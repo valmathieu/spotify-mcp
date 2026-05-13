@@ -187,10 +187,6 @@ export interface SpotifyClient {
   getMySavedTracks(options?: any): Promise<any>;
   getMySavedAlbums(options?: any): Promise<any>;
   getFollowedArtists(options?: any): Promise<any>;
-  addToMySavedTracks(trackIds: string[]): Promise<any>;
-  removeFromMySavedTracks(trackIds: string[]): Promise<any>;
-  addToMySavedAlbums(albumIds: string[]): Promise<any>;
-  removeFromMySavedAlbums(albumIds: string[]): Promise<any>;
   followArtists(artistIds: string[]): Promise<any>;
   unfollowArtists(artistIds: string[]): Promise<any>;
 

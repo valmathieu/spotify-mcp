@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - Replace wrapper-based mocks for save/remove with global `fetch` mocks; add 401-refresh-retry test and batch-size guard test for `saveTracks`
 
+### Removed
+- Drop `addToMySavedTracks`, `removeFromMySavedTracks`, `addToMySavedAlbums`, `removeFromMySavedAlbums` from the internal `SpotifyClient` interface. These targeted endpoints Spotify deprecated in February 2026 and are no longer called anywhere in the codebase.
+
 ## [1.2.4] - 2026-04-18
 
 ### Changed
