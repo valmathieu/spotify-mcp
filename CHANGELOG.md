@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Library**: Migrate `spotify_save_tracks`, `spotify_remove_saved_tracks`, `spotify_save_albums`, `spotify_remove_saved_albums` to Spotify's unified `PUT`/`DELETE /v1/me/library?uris=...` endpoint. The previous `/v1/me/tracks` and `/v1/me/albums` endpoints were deprecated in February 2026 and now return silent 403s. Tool input schemas are unchanged (still bare ID arrays); the URI prefix mapping happens internally. Batch size limit drops from 50 to 40 IDs per call per Spotify's new limit. Includes a one-shot token refresh + retry on 401.
+
+### Tests
+- Replace wrapper-based mocks for save/remove with global `fetch` mocks; add 401-refresh-retry test and batch-size guard test for `saveTracks`
+
 ## [1.2.4] - 2026-04-18
 
 ### Changed

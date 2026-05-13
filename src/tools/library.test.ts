@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../spotify/client.js", () => ({
   getAuthenticatedClient: vi.fn(),
@@ -9,9 +9,16 @@ vi.mock("../spotify/errors.js", () => ({
     isError: true,
   }),
 }));
+vi.mock("../spotify/auth.js", () => ({
+  loadTokens: vi.fn(),
+  getCredentials: vi.fn(),
+  createSpotifyClient: vi.fn(),
+  refreshAccessToken: vi.fn(),
+}));
 
 import { getAuthenticatedClient } from "../spotify/client.js";
 import { handleToolError } from "../spotify/errors.js";
+import { loadTokens, refreshAccessToken } from "../spotify/auth.js";
 import {
   getSavedTracks,
   getSavedAlbums,
@@ -26,22 +33,41 @@ import {
 
 describe("library tools", () => {
   let mockClient: any;
+  let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockClient = {
       getMySavedTracks: vi.fn(),
       getMySavedAlbums: vi.fn(),
       getFollowedArtists: vi.fn(),
-      addToMySavedTracks: vi.fn(),
-      removeFromMySavedTracks: vi.fn(),
-      addToMySavedAlbums: vi.fn(),
-      removeFromMySavedAlbums: vi.fn(),
       followArtists: vi.fn(),
       unfollowArtists: vi.fn(),
+      getAccessToken: vi.fn().mockReturnValue("test-access-token"),
     };
     vi.mocked(getAuthenticatedClient).mockResolvedValue(mockClient);
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     vi.clearAllMocks();
     vi.mocked(getAuthenticatedClient).mockResolvedValue(mockClient);
+    mockClient.getAccessToken.mockReturnValue("test-access-token");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Helper for a successful 200-empty-body fetch response
+  const ok = () => ({
+    status: 200,
+    statusText: "OK",
+    text: async () => "",
+  });
+
+  // Helper for a non-200 fetch response with a JSON error body
+  const fail = (status: number, statusText: string, bodyText: string) => ({
+    status,
+    statusText,
+    text: async () => bodyText,
   });
 
   describe("getSavedTracks", () => {
@@ -236,73 +262,135 @@ describe("library tools", () => {
   });
 
   describe("saveTracks", () => {
-    it("saves tracks and returns confirmation", async () => {
-      mockClient.addToMySavedTracks.mockResolvedValue({});
+    it("PUTs track URIs to /v1/me/library and returns confirmation", async () => {
+      fetchMock.mockResolvedValueOnce(ok());
 
       const result = await saveTracks({ track_ids: ["id1", "id2"] });
+
       expect(result.content[0].text).toBe("Saved 2 track(s) to your library");
-      expect(mockClient.addToMySavedTracks).toHaveBeenCalledWith(["id1", "id2"]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        "https://api.spotify.com/v1/me/library?uris=spotify%3Atrack%3Aid1%2Cspotify%3Atrack%3Aid2",
+      );
+      expect(init.method).toBe("PUT");
+      expect(init.headers.Authorization).toBe("Bearer test-access-token");
     });
 
-    it("calls handleToolError on API failure", async () => {
-      const error = new Error("API fail");
-      mockClient.addToMySavedTracks.mockRejectedValue(error);
+    it("surfaces Spotify error body on non-200 response", async () => {
+      fetchMock.mockResolvedValueOnce(
+        fail(403, "Forbidden", '{"error":{"status":403,"message":"Insufficient scope"}}'),
+      );
+
       const result = await saveTracks({ track_ids: ["id1"] });
-      expect(handleToolError).toHaveBeenCalledWith(error, "spotify_save_tracks");
+
       expect(result.isError).toBe(true);
+      const errorArg = vi.mocked(handleToolError).mock.calls[0][0] as any;
+      expect(errorArg.message).toContain("403");
+      expect(errorArg.message).toContain("Insufficient scope");
+      expect(errorArg.statusCode).toBe(403);
+    });
+
+    it("refreshes token and retries once on 401", async () => {
+      fetchMock.mockResolvedValueOnce(fail(401, "Unauthorized", "")).mockResolvedValueOnce(ok());
+      vi.mocked(loadTokens).mockResolvedValue({
+        accessToken: "old",
+        refreshToken: "refresh",
+        expiresAt: 0,
+      });
+      vi.mocked(refreshAccessToken).mockResolvedValue({
+        accessToken: "new-token",
+        refreshToken: "refresh",
+        expiresAt: Date.now() + 3_600_000,
+      });
+
+      const result = await saveTracks({ track_ids: ["id1"] });
+
+      expect(result.content[0].text).toBe("Saved 1 track(s) to your library");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe("Bearer new-token");
+    });
+
+    it("rejects batches larger than 40 IDs", async () => {
+      const ids = Array.from({ length: 41 }, (_, i) => `id${i}`);
+      const result = await saveTracks({ track_ids: ids });
+      expect(result.isError).toBe(true);
+      const errorArg = vi.mocked(handleToolError).mock.calls[0][0] as any;
+      expect(errorArg.message).toContain("exceeds maximum size of 40");
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
   describe("removeSavedTracks", () => {
-    it("removes tracks and returns confirmation", async () => {
-      mockClient.removeFromMySavedTracks.mockResolvedValue({});
+    it("DELETEs track URIs from /v1/me/library and returns confirmation", async () => {
+      fetchMock.mockResolvedValueOnce(ok());
 
       const result = await removeSavedTracks({ track_ids: ["id1", "id2", "id3"] });
+
       expect(result.content[0].text).toBe("Removed 3 track(s) from your library");
-      expect(mockClient.removeFromMySavedTracks).toHaveBeenCalledWith(["id1", "id2", "id3"]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        "https://api.spotify.com/v1/me/library?uris=spotify%3Atrack%3Aid1%2Cspotify%3Atrack%3Aid2%2Cspotify%3Atrack%3Aid3",
+      );
+      expect(init.method).toBe("DELETE");
     });
 
-    it("calls handleToolError on API failure", async () => {
-      const error = new Error("API fail");
-      mockClient.removeFromMySavedTracks.mockRejectedValue(error);
+    it("calls handleToolError on non-200 response", async () => {
+      fetchMock.mockResolvedValueOnce(fail(500, "Server Error", ""));
       const result = await removeSavedTracks({ track_ids: ["id1"] });
-      expect(handleToolError).toHaveBeenCalledWith(error, "spotify_remove_saved_tracks");
+      expect(handleToolError).toHaveBeenCalled();
+      const [errorArg, toolName] = vi.mocked(handleToolError).mock.calls[0] as any;
+      expect(toolName).toBe("spotify_remove_saved_tracks");
+      expect(errorArg.statusCode).toBe(500);
       expect(result.isError).toBe(true);
     });
   });
 
   describe("saveAlbums", () => {
-    it("saves albums and returns confirmation", async () => {
-      mockClient.addToMySavedAlbums.mockResolvedValue({});
+    it("PUTs album URIs to /v1/me/library and returns confirmation", async () => {
+      fetchMock.mockResolvedValueOnce(ok());
 
       const result = await saveAlbums({ album_ids: ["album1"] });
+
       expect(result.content[0].text).toBe("Saved 1 album(s) to your library");
-      expect(mockClient.addToMySavedAlbums).toHaveBeenCalledWith(["album1"]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("https://api.spotify.com/v1/me/library?uris=spotify%3Aalbum%3Aalbum1");
+      expect(init.method).toBe("PUT");
     });
 
-    it("calls handleToolError on API failure", async () => {
-      const error = new Error("API fail");
-      mockClient.addToMySavedAlbums.mockRejectedValue(error);
+    it("calls handleToolError on non-200 response", async () => {
+      fetchMock.mockResolvedValueOnce(fail(400, "Bad Request", '{"error":"bad uri"}'));
       const result = await saveAlbums({ album_ids: ["album1"] });
-      expect(handleToolError).toHaveBeenCalledWith(error, "spotify_save_albums");
+      expect(handleToolError).toHaveBeenCalled();
+      const [, toolName] = vi.mocked(handleToolError).mock.calls[0] as any;
+      expect(toolName).toBe("spotify_save_albums");
       expect(result.isError).toBe(true);
     });
   });
 
   describe("removeSavedAlbums", () => {
-    it("removes albums and returns confirmation", async () => {
-      mockClient.removeFromMySavedAlbums.mockResolvedValue({});
+    it("DELETEs album URIs from /v1/me/library and returns confirmation", async () => {
+      fetchMock.mockResolvedValueOnce(ok());
 
       const result = await removeSavedAlbums({ album_ids: ["album1", "album2"] });
+
       expect(result.content[0].text).toBe("Removed 2 album(s) from your library");
-      expect(mockClient.removeFromMySavedAlbums).toHaveBeenCalledWith(["album1", "album2"]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        "https://api.spotify.com/v1/me/library?uris=spotify%3Aalbum%3Aalbum1%2Cspotify%3Aalbum%3Aalbum2",
+      );
+      expect(init.method).toBe("DELETE");
     });
 
-    it("calls handleToolError on API failure", async () => {
-      const error = new Error("API fail");
-      mockClient.removeFromMySavedAlbums.mockRejectedValue(error);
+    it("calls handleToolError on non-200 response", async () => {
+      fetchMock.mockResolvedValueOnce(fail(403, "Forbidden", ""));
       const result = await removeSavedAlbums({ album_ids: ["album1"] });
-      expect(handleToolError).toHaveBeenCalledWith(error, "spotify_remove_saved_albums");
+      expect(handleToolError).toHaveBeenCalled();
+      const [, toolName] = vi.mocked(handleToolError).mock.calls[0] as any;
+      expect(toolName).toBe("spotify_remove_saved_albums");
       expect(result.isError).toBe(true);
     });
   });

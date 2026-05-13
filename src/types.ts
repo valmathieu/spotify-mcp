@@ -203,4 +203,5 @@ export interface SpotifyClient {
   // Auth (used internally by client.ts and auth.ts)
   setAccessToken(token: string): void;
   setRefreshToken(token: string): void;
+  getAccessToken(): string | undefined;
 }

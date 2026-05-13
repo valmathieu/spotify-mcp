@@ -3,8 +3,15 @@
  */
 
 import { getAuthenticatedClient } from "../spotify/client.js";
+import {
+  loadTokens,
+  getCredentials,
+  createSpotifyClient,
+  refreshAccessToken,
+} from "../spotify/auth.js";
 import { handleToolError } from "../spotify/errors.js";
 import { validateArraySize } from "../utils/validation.js";
+import { logger } from "../utils/logger.js";
 import type {
   ToolResponse,
   GetSavedTracksArgs,
@@ -14,6 +21,50 @@ import type {
   SaveAlbumsArgs,
   FollowArtistsArgs,
 } from "../types.js";
+
+const LIBRARY_ENDPOINT = "https://api.spotify.com/v1/me/library";
+const MAX_LIBRARY_URIS = 40;
+
+/**
+ * Call Spotify's unified library endpoint. Since February 2026 the separate
+ * /v1/me/tracks and /v1/me/albums endpoints were collapsed into this one,
+ * keyed by URI rather than path. spotify-web-api-node has not been updated,
+ * so we go to fetch directly here.
+ */
+async function callLibrary(method: "PUT" | "DELETE", uris: string[]): Promise<void> {
+  const client = await getAuthenticatedClient();
+  let accessToken = client.getAccessToken();
+  const url = `${LIBRARY_ENDPOINT}?uris=${encodeURIComponent(uris.join(","))}`;
+
+  const send = (token: string | undefined) =>
+    fetch(url, { method, headers: { Authorization: `Bearer ${token ?? ""}` } });
+
+  let response = await send(accessToken);
+
+  if (response.status === 401) {
+    logger.info("Library endpoint returned 401; refreshing token and retrying once");
+    const tokens = await loadTokens();
+    if (tokens) {
+      const refreshed = await refreshAccessToken(
+        createSpotifyClient(getCredentials()),
+        tokens.refreshToken,
+      );
+      accessToken = refreshed.accessToken;
+      response = await send(accessToken);
+    }
+  }
+
+  if (response.status === 200) return;
+
+  const body = await response.text().catch(() => "");
+  const err: any = new Error(
+    `Spotify ${method} /v1/me/library failed: ${response.status} ${response.statusText}` +
+      (body ? ` — ${body}` : ""),
+  );
+  err.statusCode = response.status;
+  err.body = body;
+  throw err;
+}
 
 export async function getSavedTracks(args: GetSavedTracksArgs): Promise<ToolResponse> {
   try {
@@ -131,11 +182,11 @@ export async function getFollowedArtists(args: GetFollowedArtistsArgs): Promise<
 
 export async function saveTracks(args: SaveTracksArgs): Promise<ToolResponse> {
   try {
-    validateArraySize(args.track_ids, 50, "track_ids");
-
-    const client = await getAuthenticatedClient();
-    await client.addToMySavedTracks(args.track_ids);
-
+    validateArraySize(args.track_ids, MAX_LIBRARY_URIS, "track_ids");
+    await callLibrary(
+      "PUT",
+      args.track_ids.map((id) => `spotify:track:${id}`),
+    );
     return {
       content: [
         {
@@ -151,11 +202,11 @@ export async function saveTracks(args: SaveTracksArgs): Promise<ToolResponse> {
 
 export async function removeSavedTracks(args: SaveTracksArgs): Promise<ToolResponse> {
   try {
-    validateArraySize(args.track_ids, 50, "track_ids");
-
-    const client = await getAuthenticatedClient();
-    await client.removeFromMySavedTracks(args.track_ids);
-
+    validateArraySize(args.track_ids, MAX_LIBRARY_URIS, "track_ids");
+    await callLibrary(
+      "DELETE",
+      args.track_ids.map((id) => `spotify:track:${id}`),
+    );
     return {
       content: [
         {
@@ -171,11 +222,11 @@ export async function removeSavedTracks(args: SaveTracksArgs): Promise<ToolRespo
 
 export async function saveAlbums(args: SaveAlbumsArgs): Promise<ToolResponse> {
   try {
-    validateArraySize(args.album_ids, 50, "album_ids");
-
-    const client = await getAuthenticatedClient();
-    await client.addToMySavedAlbums(args.album_ids);
-
+    validateArraySize(args.album_ids, MAX_LIBRARY_URIS, "album_ids");
+    await callLibrary(
+      "PUT",
+      args.album_ids.map((id) => `spotify:album:${id}`),
+    );
     return {
       content: [
         {
@@ -191,11 +242,11 @@ export async function saveAlbums(args: SaveAlbumsArgs): Promise<ToolResponse> {
 
 export async function removeSavedAlbums(args: SaveAlbumsArgs): Promise<ToolResponse> {
   try {
-    validateArraySize(args.album_ids, 50, "album_ids");
-
-    const client = await getAuthenticatedClient();
-    await client.removeFromMySavedAlbums(args.album_ids);
-
+    validateArraySize(args.album_ids, MAX_LIBRARY_URIS, "album_ids");
+    await callLibrary(
+      "DELETE",
+      args.album_ids.map((id) => `spotify:album:${id}`),
+    );
     return {
       content: [
         {
